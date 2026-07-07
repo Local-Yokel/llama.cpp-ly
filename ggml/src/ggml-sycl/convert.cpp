@@ -641,6 +641,8 @@ to_fp16_sycl_t ggml_get_to_fp16_sycl(ggml_type type, ggml_tensor * dst) {
             }
         case GGML_TYPE_Q2_K:
             return dequantize_row_q2_K_sycl;
+        case GGML_TYPE_Q2_0_BITMAJOR:
+            return dequantize_block_sycl<QK_K, 1, dequantize_q2_0_bitmajor>;
         case GGML_TYPE_Q3_K:
             return dequantize_row_q3_K_sycl;
         case GGML_TYPE_Q4_K:
@@ -715,6 +717,8 @@ to_fp32_sycl_t ggml_get_to_fp32_sycl(ggml_type type, ggml_tensor *dst) {
             }
         case GGML_TYPE_Q2_K:
             return dequantize_row_q2_K_sycl;
+        case GGML_TYPE_Q2_0_BITMAJOR:
+            return dequantize_block_sycl<QK_K, 1, dequantize_q2_0_bitmajor>;
         case GGML_TYPE_Q3_K:
             return dequantize_row_q3_K_sycl;
         case GGML_TYPE_Q4_K:

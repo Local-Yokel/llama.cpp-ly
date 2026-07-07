@@ -15,7 +15,9 @@
 
 #include <sycl/sycl.hpp>
 #include <sycl/half_type.hpp>
+#ifdef GGML_SYCL_MKL
 #include <oneapi/mkl.hpp>
+#endif
 
 #include <map>
 
@@ -82,6 +84,7 @@ inline std::string get_device_backend_and_type(const sycl::device &device) {
     return device_type.str();
 }
 
+#ifdef GGML_SYCL_MKL
 template <typename Ts> struct matrix_info_t {
     oneapi::mkl::transpose transpose_info[2];
     Ts                     value_info[2];
@@ -89,6 +92,7 @@ template <typename Ts> struct matrix_info_t {
     std::int64_t           ld_info[3];
     std::int64_t           groupsize_info;
 };
+#endif
 
 namespace dpct
 {
@@ -1704,6 +1708,7 @@ namespace dpct
         return detail::get_value(s, q);
     }
 
+#ifdef GGML_SYCL_MKL
     namespace detail
     {
     template <class Ta, class Tb, class Tc, class Ts>
@@ -2904,7 +2909,8 @@ namespace dpct
             /// Default constructor
             device_memory() : base(1) {}
         };
-        } // namespace detail
+    } // namespace detail
+#endif // GGML_SYCL_MKL
 
     template <class T, size_t Dimension>
     using global_memory = detail::device_memory<T, global, Dimension>;

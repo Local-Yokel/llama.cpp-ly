@@ -914,5 +914,31 @@ static void dequantize_block_nvfp4(
     yy[y1] = ggml_sycl_cast<dst_t>(d * kvalues_mxfp4[q >> 4]);
 }
 
+// BITMAJOR Q2_0 dequantize: 256 values per block, 2 bits per value in bit-major order
+// Values are {-1, 0, 1} * d. Layout: first 128 values in bytes 0-31, second 128 in bytes 32-63.
+static __dpct_inline__ void dequantize_q2_0_bitmajor(const void *vx, const int64_t ib,
+                                                      const int iqs, dfloat2 &v) {
+    const block_q2_0_bitmajor * x = (const block_q2_0_bitmajor *) vx;
+    const dfloat d = x[ib].d;
+
+    auto get_val = [&](int pos) -> int {
+        int byte_idx, bit_pair;
+        if (pos < 128) {
+            byte_idx = pos % 32;
+            bit_pair = pos / 32;
+        } else {
+            byte_idx = 32 + (pos - 128) % 32;
+            bit_pair = (pos - 128) / 32;
+        }
+        return ((x[ib].qs[byte_idx] >> (2 * bit_pair)) & 3) - 1;
+    };
+
+    const int xi0 = get_val(iqs);
+    const int xi1 = get_val(iqs + 1);
+
+    v.x() = xi0 * d;
+    v.y() = xi1 * d;
+}
+
 
 #endif // GGML_SYCL_DEQUANTIZE_HPP

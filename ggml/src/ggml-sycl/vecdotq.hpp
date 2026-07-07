@@ -1453,4 +1453,33 @@ vec_dot_iq4_xs_q8_1(const void *__restrict__ vbq,
 #endif
 }
 
+// BITMAJOR Q2_0 vec_dot: 256 values per block, 2 bits per value in bit-major order.
+// Values are {-1, 0, 1} * d. Q8_1 values are qs[i] * d_y + m_y.
+#define VDR_Q2_0_BITMAJOR_Q8_1_MMVQ 1
+
+static __dpct_inline__ float
+vec_dot_q2_0_bitmajor_q8_1(const void *__restrict__ vbq,
+                           const block_q8_1 *__restrict__ bq8_1, const int &iqs) {
+    const block_q2_0_bitmajor * bq2 = (const block_q2_0_bitmajor *) vbq;
+
+    // Extract one 2-bit value at position iqs from bit-major layout
+    int byte_idx, bit_pair;
+    if (iqs < 128) {
+        byte_idx = iqs % 32;
+        bit_pair = iqs / 32;
+    } else {
+        byte_idx = 32 + (iqs - 128) % 32;
+        bit_pair = (iqs - 128) / 32;
+    }
+    const int xi = ((bq2->qs[byte_idx] >> (2 * bit_pair)) & 3) - 1;  // {-1, 0, 1}
+
+    const float d_x = GGML_FP16_TO_FP32(bq2->d);
+    const float d_y = GGML_FP16_TO_FP32(bq8_1->ds[0]);
+    const float m_y = GGML_FP16_TO_FP32(bq8_1->ds[1]);
+    const int   qy = bq8_1->qs[iqs];
+
+    return (float)xi * (qy * d_y + m_y) * d_x;
+}
+
+
 #endif // GGML_SYCL_VECDOTQ_HPP
