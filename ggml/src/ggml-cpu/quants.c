@@ -30,6 +30,14 @@ void quantize_row_q2_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, in
     quantize_row_q2_0_ref(x, y, k);
 }
 
+void quantize_row_q2_0_wide(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_q2_0_wide_ref(x, y, k);
+}
+
+void quantize_row_q2_0_bitmajor(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_q2_0_bitmajor_ref(x, y, k);
+}
+
 void quantize_row_q4_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
     quantize_row_q4_0_ref(x, y, k);
 }
@@ -197,6 +205,105 @@ void ggml_vec_dot_q2_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, c
 
         for (int k = 0; k < 4; k++) {
             const block_q8_0 * GGML_RESTRICT yb = &y[i * 4 + k];
+            const float d1 = GGML_CPU_FP16_TO_FP32(yb->d);
+            int sumi_block = 0;
+
+            const uint8_t * GGML_RESTRICT qs = &x[i].qs[k * 8];
+            const int8_t  * GGML_RESTRICT qy = yb->qs;
+
+            for (int b = 0; b < 8; ++b) {
+                const uint8_t byte = qs[b];
+                // Extract 4 two-bit values, map {0,1,2,3} -> {-1,0,1,2}
+                sumi_block += ((int)((byte >> 0) & 3) - 1) * qy[b*4 + 0];
+                sumi_block += ((int)((byte >> 2) & 3) - 1) * qy[b*4 + 1];
+                sumi_block += ((int)((byte >> 4) & 3) - 1) * qy[b*4 + 2];
+                sumi_block += ((int)((byte >> 6) & 3) - 1) * qy[b*4 + 3];
+            }
+
+            sumi += d1 * sumi_block;
+        }
+
+        sumf += d0 * sumi;
+    }
+
+    *s = sumf;
+}
+
+void ggml_vec_dot_q2_0_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_q2_0 * GGML_RESTRICT x = vx;
+    const block_q8_K  * GGML_RESTRICT y = vy;
+
+    const int nb = n / QK_K;  // Q8_K blocks (256-wide)
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; ++i) {
+        // Two Q2_0 blocks (128-wide each) per Q8_K block
+        const block_q2_0 * x0 = &x[i * 2];
+        const block_q2_0 * x1 = &x[i * 2 + 1];
+
+        const float d0 = GGML_CPU_FP16_TO_FP32(x0->d);
+        const float d1 = GGML_CPU_FP16_TO_FP32(x1->d);
+        const float dy = y[i].d;
+
+        int32_t sumi0 = 0;
+        int32_t sumi1 = 0;
+
+        // Process 32 bytes of Q2_0 weights at a time (128 values)
+        for (size_t j = 0; j < sizeof(x0->qs); j += 32) {
+            for (size_t k = 0; k < 32; ++k) {
+                const uint8_t byte0 = x0->qs[j + k];
+                const uint8_t byte1 = x1->qs[j + k];
+
+                // Block 0: first 128 Q8_K values
+                sumi0 += y[i].qs[j*4 + k*4 + 0] * (((byte0 >> 0) & 3) - 1);
+                sumi0 += y[i].qs[j*4 + k*4 + 1] * (((byte0 >> 2) & 3) - 1);
+                sumi0 += y[i].qs[j*4 + k*4 + 2] * (((byte0 >> 4) & 3) - 1);
+                sumi0 += y[i].qs[j*4 + k*4 + 3] * (((byte0 >> 6) & 3) - 1);
+
+                // Block 1: next 128 Q8_K values
+                sumi1 += y[i].qs[j*4 + k*4 + 128] * (((byte1 >> 0) & 3) - 1);
+                sumi1 += y[i].qs[j*4 + k*4 + 129] * (((byte1 >> 2) & 3) - 1);
+                sumi1 += y[i].qs[j*4 + k*4 + 130] * (((byte1 >> 4) & 3) - 1);
+                sumi1 += y[i].qs[j*4 + k*4 + 131] * (((byte1 >> 6) & 3) - 1);
+            }
+        }
+
+        sumf += (float) sumi0 * d0 * dy;
+        sumf += (float) sumi1 * d1 * dy;
+    }
+
+    *s = sumf;
+}
+
+void ggml_vec_dot_q2_0_wide_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    const int qk = QK2_0_WIDE;
+    const int nb = n / qk;
+
+    assert(n % qk == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_q2_0_wide * GGML_RESTRICT x = vx;
+    const block_q8_0 * GGML_RESTRICT y = vy;
+
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; i++) {
+        const float d0 = GGML_CPU_FP16_TO_FP32(x[i].d);
+
+        float sumi = 0.0f;
+
+        for (int k = 0; k < 8; k++) {
+            const block_q8_0 * GGML_RESTRICT yb = &y[i * 8 + k];
             const float d1 = GGML_CPU_FP16_TO_FP32(yb->d);
             int sumi_block = 0;
 

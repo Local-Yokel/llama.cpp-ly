@@ -142,6 +142,8 @@ struct common_speculative_state {
             llama_tokens & result) = 0;
 
     virtual void accept(uint16_t n_accepted) = 0;
+
+    virtual void clear() {}
 };
 
 struct common_speculative_state_draft : public common_speculative_state {

@@ -38,6 +38,8 @@ static std::string llama_model_ftype_name(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_BF16:     return "BF16";
         case LLAMA_FTYPE_MOSTLY_Q1_0:     return "Q1_0";
         case LLAMA_FTYPE_MOSTLY_Q2_0:     return "Q2_0";
+        case LLAMA_FTYPE_MOSTLY_Q2_0_WIDE: return "Q2_0_WIDE";
+        case LLAMA_FTYPE_MOSTLY_Q2_0_BITMAJOR: return "Q2_0_BITMAJOR";
         case LLAMA_FTYPE_MOSTLY_Q4_0:     return "Q4_0";
         case LLAMA_FTYPE_MOSTLY_Q4_1:     return "Q4_1";
         case LLAMA_FTYPE_MOSTLY_Q5_0:     return "Q5_0";

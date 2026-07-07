@@ -191,6 +191,22 @@ typedef struct {
 } block_q2_0;
 static_assert(sizeof(block_q2_0) == sizeof(ggml_half) + QK2_0 / 4, "wrong q2_0 block size/padding");
 
+#define QK2_0_WIDE 256
+typedef struct {
+    ggml_half d;                    // delta (scale)
+    uint8_t qs[QK2_0_WIDE / 4];    // 2 bits per element -> 64 bytes
+} block_q2_0_wide;
+static_assert(sizeof(block_q2_0_wide) == sizeof(ggml_half) + QK2_0_WIDE / 4, "wrong q2_0_wide block size/padding");
+
+// Bit-major Q2_0: 256-wide blocks, same ternary values, bit-major packing
+// Byte m stores bits for values [m, m+32, m+64, m+96] — enables shift+AND extraction
+// 1:1 mapping with Q8_K blocks, same architecture as TQ2_0
+typedef struct {
+    ggml_half d;              // delta (scale)
+    uint8_t qs[QK_K / 4];    // 2 bits per element, bit-major order (64 bytes)
+} block_q2_0_bitmajor;
+static_assert(sizeof(block_q2_0_bitmajor) == sizeof(ggml_half) + QK_K / 4, "wrong q2_0_bitmajor block size/padding");
+
 #define QK4_0 32
 typedef struct {
     ggml_half d;           // delta
