@@ -1,29 +1,25 @@
-// cpu simulation of the q2_0 vulkan shader functions.
+// cpu simulation of the group-128 2-bit (q2_0-family) bit-extraction pattern.
 //
-// this file is one step of a three-step proof of extensional equivalence between
-// the q2_0 glsl shader code and the cpu reference in ggml-quants.c.
+// HISTORICAL NOTE (bonsai2 merge, 2026-10-19). This file was written when our
+// group-128 codec was GGML_TYPE_Q2_0 (type 42) and had its own Vulkan shaders,
+// and it was one step of a three-step proof of extensional equivalence between
+// those glsl shaders and the cpu reference in ggml-quants.c. The merge moved
+// that codec to upstream's GGML_TYPE_PQ2_0 (142) and took upstream's Vulkan
+// shaders (dequant_pq2_0.comp et al) in place of ours. The glsl quoted below is
+// therefore NOT the glsl in the tree any more, so the shader-equivalence claim
+// no longer holds and has been retired.
 //
-// the first step lives in this file: the c++ functions named sim_* are literal
-// text-level translations of the glsl functions, with the glsl source quoted in
-// the comment immediately above each sim_*. a reader can verify by visual
-// inspection that the c++ and the glsl compute the same value.
+// What remains valid, and is why this file is kept: its `sim_*` functions are
+// literal translations of the group-128 2-bit extraction pattern that PQ2_0
+// still uses (34-byte block, LSB pair first, byte b holding weights 4b..4b+3),
+// and the exhaustive checks below (every byte value x every slot x every
+// alignment) plus the randomised block comparisons against the cpu reference
+// still prove that pattern correct. It is now a codec test, not a shader proof.
 //
-// the second step also lives in this file: the simulator runs against the cpu
-// reference for randomized blocks and for every byte value x every slot x every
-// alignment (exhaustive). passing this proves that the bit-extraction pattern
-// is correct.
+// If a shader-equivalence proof is wanted again, it must be re-derived against
+// ggml/src/ggml-vulkan/vulkan-shaders/dequant_pq2_0.comp (upstream's).
 //
-// the third step is a separate run of test-backend-ops on vulkan. once the
-// shaders are compiled to spir-v and run on an actual gpu, test-backend-ops
-// compares vulkan-backed tensor ops (get_rows, mul_mat, cpy, set_rows) against
-// the cpu backend. that's the only step that proves the glsl itself is correct
-// end-to-end, since steps one and two only validate the c++ stand-in.
-//
-// steps one and two catch nearly all transcription errors before the slow gpu
-// build. step three covers the rest (glsl -> spir-v compiler quirks, driver
-// issues, memory layout, etc) and is required to declare the shader correct.
-//
-// files this simulator stands in for:
+// files this simulator historically stood in for:
 // ggml/src/ggml-vulkan/vulkan-shaders/dequant_funcs.glsl (matvec)
 // ggml/src/ggml-vulkan/vulkan-shaders/dequant_q2_0.comp (standalone dequant)
 // ggml/src/ggml-vulkan/vulkan-shaders/dequant_funcs_cm2.glsl (cooperative matrix 2)

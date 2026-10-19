@@ -5476,6 +5476,8 @@ class GGMLQuantizationType(IntEnum):
     NVFP4   = 40
     Q1_0    = 41
     Q2_0    = 42
+    Q2_0_WIDE = 43
+    Q2_0_BITMAJOR = 44
     PQ2_0   = 142
     PTQ1_0  = 143
 
@@ -5534,6 +5536,8 @@ class LlamaFileType(IntEnum):
     MOSTLY_NVFP4         = 39  # except 1d tensors
     MOSTLY_Q1_0          = 40  # except 1d tensors
     MOSTLY_Q2_0          = 41  # except 1d tensors
+    MOSTLY_Q2_0_WIDE     = 42  # except 1d tensors (LY: 256-wide 2-bit)
+    MOSTLY_Q2_0_BITMAJOR = 43  # except 1d tensors (LY: BPIM, 256-wide bit-major)
     MOSTLY_PQ2_0         = 128  # except 1d tensors
     MOSTLY_PTQ1_0        = 129  # except 1d tensors
 
@@ -5672,6 +5676,8 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.NVFP4:   (64, 4 + 32),
     GGMLQuantizationType.Q1_0:    (128, 2 + 16),
     GGMLQuantizationType.Q2_0:    (64, 2 + 16),
+    GGMLQuantizationType.Q2_0_WIDE: (256, 2 + 64),
+    GGMLQuantizationType.Q2_0_BITMAJOR: (256, 2 + 64),
     GGMLQuantizationType.PQ2_0:   (128, 2 + 32),
     GGMLQuantizationType.PTQ1_0:  (128, 2 + 24 + 2),
 }
