@@ -2,6 +2,7 @@
 
 #include "ggml.h"
 #include "ggml-cpu.h"
+#include "../ggml/src/ggml-quants.h"
 
 #undef NDEBUG
 #include <assert.h>
@@ -102,32 +103,40 @@ static float dot_product_error(const ggml_type_traits * qfns, const ggml_type_tr
     return fabsf(result - dot_ref) / test_size;
 }
 
-int main(int argc, char * argv[]) {
-    bool verbose = false;
-    const size_t test_size = 32 * 128;
+static int test_vec_dot_f32(bool verbose) {
+    const auto * f32 = ggml_get_type_traits_cpu(GGML_TYPE_F32);
+    int num_failed = 0;
+    for (int n : {1, 2, 3, 5, 7, 8, 15, 16, 17, 31, 33, 63, 67, 127, 129, 193, 255, 1023}) {
+        std::vector<float> a(n);
+        std::vector<float> b(n);
+        generate_data(0.0, n, a.data());
+        generate_data(1.0, n, b.data());
 
-    std::string arg;
-    for (int i = 1; i < argc; i++) {
-        arg = argv[i];
+        float result = 0.0f;
+        f32->vec_dot(n, &result, 0, a.data(), 0, b.data(), 0, 1);
+        const float ref = dot_product(a.data(), b.data(), n);
+        const float error = fabsf(result - ref) / n;
 
-        if (arg == "-v") {
-            verbose = true;
-        } else {
-            fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
-            return 1;
+        const bool failed = !(error < MAX_QUANTIZATION_REFERENCE_ERROR);
+        num_failed += failed;
+        if (failed || verbose) {
+            printf(" f32 vec_dot n=%4d:                 %s (ref=%f got=%f err=%f)\n",
+                   n, RESULT_STR[failed], ref, result, error);
         }
     }
+    return num_failed;
+}
+
+static int test_vec_dot_q(bool verbose) {
+    int num_failed = 0;
+
+    const size_t test_size = 32 * 128;
 
     std::vector<float> test_data(test_size);
     std::vector<float> test_data2(test_size);
 
     generate_data(0.0, test_data.size(), test_data.data());
     generate_data(1.0, test_data2.size(), test_data2.data());
-
-    ggml_cpu_init();
-
-    int num_failed = 0;
-    bool failed = false;
 
     for (int i = 0; i < GGML_TYPE_COUNT; i++) {
         ggml_type type = (ggml_type) i;
@@ -150,13 +159,16 @@ int main(int argc, char * argv[]) {
                 type == GGML_TYPE_Q1_0    ? MAX_QUANTIZATION_TOTAL_ERROR_BINARY :
                 type == GGML_TYPE_TQ1_0   ? MAX_QUANTIZATION_TOTAL_ERROR_TERNARY :
                 type == GGML_TYPE_TQ2_0   ? MAX_QUANTIZATION_TOTAL_ERROR_TERNARY :
+                type == GGML_TYPE_Q2_0    ? MAX_QUANTIZATION_TOTAL_ERROR_TERNARY :
+                type == GGML_TYPE_PQ2_0 ? MAX_QUANTIZATION_TOTAL_ERROR_TERNARY :
+                type == GGML_TYPE_PTQ1_0 ? MAX_QUANTIZATION_TOTAL_ERROR_TERNARY :
                 type == GGML_TYPE_Q2_K    ? MAX_QUANTIZATION_TOTAL_ERROR_2BITS :
                 type == GGML_TYPE_IQ2_S   ? MAX_QUANTIZATION_TOTAL_ERROR_2BITS :
                 type == GGML_TYPE_Q3_K    ? MAX_QUANTIZATION_TOTAL_ERROR_3BITS :
                 type == GGML_TYPE_IQ3_S   ? MAX_QUANTIZATION_TOTAL_ERROR_3BITS :
                 type == GGML_TYPE_IQ3_XXS ? MAX_QUANTIZATION_TOTAL_ERROR_3BITS_XXS :
                 type == GGML_TYPE_NVFP4   ? MAX_QUANTIZATION_TOTAL_ERROR_FP4 : MAX_QUANTIZATION_TOTAL_ERROR;
-            failed = !(total_error < max_quantization_error);
+            bool failed = !(total_error < max_quantization_error);
             num_failed += failed;
             if (failed || verbose) {
                 printf("%5s absolute quantization error:    %s (%f)\n", ggml_type_name(type), RESULT_STR[failed], total_error);
@@ -171,15 +183,15 @@ int main(int argc, char * argv[]) {
 
             const float vec_dot_error = dot_product_error(qfns, qfns_cpu, test_size, test_data.data(), test_data2.data());
             const float max_allowed_error = type == GGML_TYPE_Q2_K || type == GGML_TYPE_IQ2_XS || type == GGML_TYPE_IQ2_XXS ||
-                                            type == GGML_TYPE_IQ3_XXS || type == GGML_TYPE_IQ3_S || type == GGML_TYPE_IQ2_S
-                                          ? MAX_DOT_PRODUCT_ERROR_LOWBIT
-                                          : type == GGML_TYPE_Q1_0
-                                          ? MAX_DOT_PRODUCT_ERROR_BINARY
-                                          : type == GGML_TYPE_TQ1_0 || type == GGML_TYPE_TQ2_0
-                                          ? MAX_DOT_PRODUCT_ERROR_TERNARY
-                                          : type == GGML_TYPE_NVFP4
-                                          ? MAX_DOT_PRODUCT_ERROR_FP4
-                                          : MAX_DOT_PRODUCT_ERROR;
+                type == GGML_TYPE_IQ3_XXS || type == GGML_TYPE_IQ3_S || type == GGML_TYPE_IQ2_S
+                ? MAX_DOT_PRODUCT_ERROR_LOWBIT
+                : type == GGML_TYPE_Q1_0
+                ? MAX_DOT_PRODUCT_ERROR_BINARY
+                : type == GGML_TYPE_TQ1_0 || type == GGML_TYPE_TQ2_0 || type == GGML_TYPE_Q2_0 || type == GGML_TYPE_PQ2_0 || type == GGML_TYPE_PTQ1_0
+                ? MAX_DOT_PRODUCT_ERROR_TERNARY
+                : type == GGML_TYPE_NVFP4
+                ? MAX_DOT_PRODUCT_ERROR_FP4
+                : MAX_DOT_PRODUCT_ERROR;
             failed = !(vec_dot_error < max_allowed_error);
             num_failed += failed;
             if (failed || verbose) {
@@ -187,6 +199,110 @@ int main(int argc, char * argv[]) {
             }
         }
     }
+
+    return num_failed;
+}
+
+static int test_vec_dot_ternary(bool verbose) {
+    int num_failed = 0;
+    for (ggml_type type : {GGML_TYPE_PQ2_0, GGML_TYPE_PTQ1_0}) {
+        const auto * traits = ggml_get_type_traits(type);
+        const auto * cpu = ggml_get_type_traits_cpu(type);
+        // PQ2_0 dots against Q8_K (one float scale per 256), PTQ1_0 against Q8_0 (one fp16
+        // scale per 32), so the activation side is built per format. PQ2_0 needs whole Q8_K
+        // blocks, i.e. an even number of 128-weight blocks.
+        const bool  q8k      = type == GGML_TYPE_PQ2_0;
+        const ggml_type ytype = q8k ? GGML_TYPE_Q8_K : GGML_TYPE_Q8_0;
+        for (int nb : q8k ? std::vector<int>{2, 4} : std::vector<int>{1, 3}) {
+            const int n = nb * 128;
+            std::vector<block_pq2_0> pq(nb);
+            std::vector<block_ptq1_0> ptq(nb);
+            std::vector<block_q8_0> q8(nb * 4);
+            std::vector<block_q8_K> q8k_blocks(nb / 2 + 1);
+            std::vector<float> x(n), y(n);
+            const void * weights = type == GGML_TYPE_PQ2_0 ? (const void *) pq.data() : (const void *) ptq.data();
+            for (int pattern = 0; pattern < 256; ++pattern) {
+                for (int i = 0; i < nb; ++i) {
+                    pq[i].d = ptq[i].d = ggml_fp32_to_fp16(0.25f * (i + 1));
+                    for (size_t j = 0; j < sizeof(pq[i].qs); ++j) {
+                        pq[i].qs[j] = (uint8_t) (pattern + 17*j + i);
+                    }
+                    for (size_t j = 0; j < sizeof(ptq[i].qs); ++j) {
+                        ptq[i].qs[j] = (uint8_t) (pattern + 17*j + i);
+                    }
+                    for (size_t j = 0; j < sizeof(ptq[i].qh); ++j) {
+                        ptq[i].qh[j] = (uint8_t) (pattern + 37*j + i);
+                    }
+                }
+                for (int i = 0; i < nb * 4; ++i) {
+                    q8[i].d = ggml_fp32_to_fp16(0.125f * (i % 4 + 1));
+                    for (int j = 0; j < QK8_0; ++j) {
+                        q8[i].qs[j] = (int8_t) ((pattern + 13*j + i) % 256 - 128);
+                    }
+                }
+                for (size_t i = 0; i < q8k_blocks.size(); ++i) {
+                    q8k_blocks[i].d = 0.125f * (i % 4 + 1);
+                    for (int j = 0; j < QK_K; ++j) {
+                        q8k_blocks[i].qs[j] = (int8_t) ((pattern + 13*j + i) % 256 - 128);
+                    }
+                    // bsums is unused by the PQ2_0 dot but keep it consistent.
+                    for (int j = 0; j < QK_K/16; ++j) {
+                        int16_t s = 0;
+                        for (int t = 0; t < 16; ++t) s += q8k_blocks[i].qs[j*16 + t];
+                        q8k_blocks[i].bsums[j] = s;
+                    }
+                }
+                const void * acts = q8k ? (const void *) q8k_blocks.data() : (const void *) q8.data();
+                traits->to_float(weights, x.data(), n);
+                if (q8k) {
+                    // Q8_K is an activation-only type and has no to_float, so expand it here.
+                    for (int j = 0; j < n; ++j) {
+                        const block_q8_K & b = q8k_blocks[j / QK_K];
+                        y[j] = b.d * (float) b.qs[j % QK_K];
+                    }
+                } else {
+                    ggml_get_type_traits(ytype)->to_float(acts, y.data(), n);
+                }
+                const float ref = dot_product(x.data(), y.data(), n);
+                float result = INFINITY;
+                cpu->vec_dot(n, &result, 0, weights, 0, acts, 0, 1);
+                // Power-of-two scales keep this comparison exact.
+                const bool failed = result != ref;
+                num_failed += failed;
+                if (failed) {
+                    printf("%5s packed dot nb=%d pattern=%d: FAILED (ref=%f got=%f)\n", ggml_type_name(type), nb, pattern, ref, result);
+                }
+            }
+        }
+    }
+    if (num_failed || verbose) {
+        printf("ternary packed dot products: %s (%d failures)\n", RESULT_STR[num_failed != 0], num_failed);
+    }
+    return num_failed;
+}
+
+int main(int argc, char * argv[]) {
+    bool verbose = false;
+
+    std::string arg;
+    for (int i = 1; i < argc; i++) {
+        arg = argv[i];
+
+        if (arg == "-v") {
+            verbose = true;
+        } else {
+            fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
+            return 1;
+        }
+    }
+
+    ggml_cpu_init();
+
+    int num_failed = 0;
+
+    num_failed += test_vec_dot_f32(verbose);
+    num_failed += test_vec_dot_q(verbose);
+    num_failed += test_vec_dot_ternary(verbose);
 
     if (num_failed || verbose) {
         printf("%d tests failed\n", num_failed);

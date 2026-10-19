@@ -2,13 +2,6 @@
 #include "dequantize.hpp"
 #include "presets.hpp"
 
-#if defined(__INTEL_LLVM_COMPILER)
-    #if __has_include(<sycl/ext/oneapi/bfloat16.hpp>)
-        #include <sycl/ext/oneapi/bfloat16.hpp>
-        #define GGML_SYCL_HAS_BF16
-    #endif
-#endif
-
 template <int qk, int qr, dequantize_kernel_t dequantize_kernel, typename dst_t>
 static void dequantize_block(const void * __restrict__ vx, dst_t * __restrict__ y, const int64_t k,
                              const sycl::nd_item<3> &item_ct1) {
@@ -84,6 +77,19 @@ static void dequantize_row_q2_K_sycl(const void *vx, dst_t *y, const int64_t k,
 }
 
 template <typename dst_t>
+static void dequantize_row_q2_K_sycl_reorder(const void *vx, dst_t *y, const int64_t k,
+                                             dpct::queue_ptr stream) {
+    const int64_t nb = k / QK_K;
+
+    dpct::has_capability_or_fail(stream->get_device(), { sycl::aspect::fp16 });
+    stream->parallel_for(
+        sycl::nd_range<3>(sycl::range<3>(1, 1, nb) * sycl::range<3>(1, 1, 64), sycl::range<3>(1, 1, 64)),
+        [=](sycl::nd_item<3> item_ct1) {
+            dequantize_block_q2_K_reorder(vx, y, item_ct1, nb);
+        });
+}
+
+template <typename dst_t>
 static void dequantize_row_q3_K_sycl(const void *vx, dst_t *y, const int64_t k,
                                      dpct::queue_ptr stream) {
     const int64_t nb = k / QK_K;
@@ -112,6 +118,19 @@ static void dequantize_row_q3_K_sycl(const void *vx, dst_t *y, const int64_t k,
                              });
     }
 #endif
+}
+
+template <typename dst_t>
+static void dequantize_row_q3_K_sycl_reorder(const void *vx, dst_t *y, const int64_t k,
+                                             dpct::queue_ptr stream) {
+    const int64_t nb = k / QK_K;
+
+    dpct::has_capability_or_fail(stream->get_device(), { sycl::aspect::fp16 });
+    stream->parallel_for(
+        sycl::nd_range<3>(sycl::range<3>(1, 1, nb) * sycl::range<3>(1, 1, 64), sycl::range<3>(1, 1, 64)),
+        [=](sycl::nd_item<3> item_ct1) {
+            dequantize_block_q3_K_reorder(vx, y, item_ct1, nb);
+        });
 }
 
 template <typename dst_t>
@@ -149,6 +168,35 @@ static void dequantize_row_q4_0_sycl_reorder(const void *vx, dst_t *y, const int
             dequantize_block_q4_0_reorder(vx, y, k, item_ct1);
         });
 
+}
+
+template <typename dst_t>
+static void dequantize_row_pq2_0_sycl_reorder(const void * vx, dst_t * y, const int64_t k, dpct::queue_ptr stream) {
+    GGML_ASSERT(k % QK_PQ2_0 == 0);
+    const uint8_t *    qs = (const uint8_t *) vx;
+    const sycl::half * d  = (const sycl::half *) (qs + k / 4);
+    stream->parallel_for(sycl::range<1>(k / 4), [=](sycl::id<1> i) {
+        const float   dv = d[i / (QK_PQ2_0 / 4)];
+        const uint8_t q  = qs[i];
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            y[i * 4 + j] = (float) (((q >> (2 * j)) & 3) - 1) * dv;
+        }
+    });
+}
+
+template <typename dst_t>
+static void dequantize_row_ptq1_0_sycl_reorder(const void * vx, dst_t * y, const int64_t k, dpct::queue_ptr stream) {
+    GGML_ASSERT(k % QK_PTQ1_0 == 0);
+    const int64_t      nb = k / QK_PTQ1_0;
+    const uint8_t *    qs = (const uint8_t *) vx;
+    const uint8_t *    qh = qs + nb * 24;
+    const sycl::half * d  = (const sycl::half *) (qs + nb * 26);
+    stream->parallel_for(sycl::range<1>(k), [=](sycl::id<1> id) {
+        const int64_t i  = id[0];
+        const int64_t ib = i / QK_PTQ1_0;
+        y[i] = (float) (ptq1_0_trit(qs + ib * 24, qh + ib * 2, (int) (i % QK_PTQ1_0)) - 1) * (float) d[ib];
+    });
 }
 
 template <typename dst_t>
@@ -257,6 +305,23 @@ static void dequantize_row_q5_K_sycl(const void *vx, dst_t *y, const int64_t k,
     }
 
 #endif
+}
+
+template <typename dst_t>
+static void dequantize_row_q5_K_sycl_reorder(const void * vx, dst_t * y, const int64_t k, dpct::queue_ptr stream) {
+    const int64_t nb = k / QK_K;
+
+    dpct::has_capability_or_fail(stream->get_device(), { sycl::aspect::fp16 });
+
+    stream->submit([&](sycl::handler & cgh) {
+        sycl::local_accessor<uint8_t, 1> scale_local_acc(sycl::range<1>(K_SCALE_SIZE), cgh);
+
+        cgh.parallel_for(
+            sycl::nd_range<3>(sycl::range<3>(1, 1, nb) * sycl::range<3>(1, 1, 64), sycl::range<3>(1, 1, 64)),
+            [=](sycl::nd_item<3> item_ct1) {
+                dequantize_block_q5_K_reorder(vx, y, get_pointer(scale_local_acc), item_ct1, nb);
+            });
+    });
 }
 
 template <typename dst_t>
@@ -619,6 +684,22 @@ static void convert_unary_sycl(const void * vx, dst_t * y, const int64_t k, dpct
 
 to_fp16_sycl_t ggml_get_to_fp16_sycl(ggml_type type, ggml_tensor * dst) {
     switch (type) {
+        case GGML_TYPE_Q1_0:
+            return dequantize_block_sycl<QK1_0, QR1_0, dequantize_q1_0>;
+        case GGML_TYPE_Q2_0:
+            return dequantize_block_sycl<QK2_0, QR2_0, dequantize_q2_0>;
+        case GGML_TYPE_PTQ1_0:
+            if (dst->src[0]->extra &&
+                ((ggml_tensor_extra_gpu *) dst->src[0]->extra)->optimized_feature.reorder) {
+                return dequantize_row_ptq1_0_sycl_reorder;
+            }
+            return dequantize_block_sycl<QK_PTQ1_0, QR_PTQ1_0, dequantize_ptq1_0>;
+        case GGML_TYPE_PQ2_0:
+            if (dst->src[0]->extra &&
+                ((ggml_tensor_extra_gpu *) dst->src[0]->extra)->optimized_feature.reorder) {
+                return dequantize_row_pq2_0_sycl_reorder;
+            }
+            return dequantize_block_sycl<QK_PQ2_0, QR_PQ2_0, dequantize_pq2_0>;
         case GGML_TYPE_Q4_0:
             if (dst->src[0]->extra &&
                 ((ggml_tensor_extra_gpu*)dst->src[0]->extra)->optimized_feature.reorder) {
@@ -640,11 +721,19 @@ to_fp16_sycl_t ggml_get_to_fp16_sycl(ggml_type type, ggml_tensor * dst) {
                 return dequantize_block_sycl<QK8_0, QR8_0, dequantize_q8_0>;
             }
         case GGML_TYPE_Q2_K:
-            return dequantize_row_q2_K_sycl;
+            if (dst->src[0]->extra && ((ggml_tensor_extra_gpu *) dst->src[0]->extra)->optimized_feature.reorder) {
+                return dequantize_row_q2_K_sycl_reorder;
+            } else {
+                return dequantize_row_q2_K_sycl;
+            }
         case GGML_TYPE_Q2_0_BITMAJOR:
             return dequantize_block_sycl<QK_K, 1, dequantize_q2_0_bitmajor>;
         case GGML_TYPE_Q3_K:
-            return dequantize_row_q3_K_sycl;
+            if (dst->src[0]->extra && ((ggml_tensor_extra_gpu *) dst->src[0]->extra)->optimized_feature.reorder) {
+                return dequantize_row_q3_K_sycl_reorder;
+            } else {
+                return dequantize_row_q3_K_sycl;
+            }
         case GGML_TYPE_Q4_K:
             if (dst->src[0]->extra && ((ggml_tensor_extra_gpu *) dst->src[0]->extra)->optimized_feature.reorder) {
                 return dequantize_row_q4_K_sycl_reorder;
@@ -652,7 +741,11 @@ to_fp16_sycl_t ggml_get_to_fp16_sycl(ggml_type type, ggml_tensor * dst) {
                 return dequantize_row_q4_K_sycl;
             }
         case GGML_TYPE_Q5_K:
-            return dequantize_row_q5_K_sycl;
+            if (dst->src[0]->extra && ((ggml_tensor_extra_gpu *) dst->src[0]->extra)->optimized_feature.reorder) {
+                return dequantize_row_q5_K_sycl_reorder;
+            } else {
+                return dequantize_row_q5_K_sycl;
+            }
         case GGML_TYPE_Q6_K:
             if (dst->src[0]->extra && ((ggml_tensor_extra_gpu *) dst->src[0]->extra)->optimized_feature.reorder) {
                 return dequantize_row_q6_K_sycl_reorder;
@@ -695,6 +788,22 @@ to_fp16_sycl_t ggml_get_to_fp16_sycl(ggml_type type, ggml_tensor * dst) {
 
 to_fp32_sycl_t ggml_get_to_fp32_sycl(ggml_type type, ggml_tensor *dst) {
     switch (type) {
+        case GGML_TYPE_Q1_0:
+            return dequantize_block_sycl<QK1_0, QR1_0, dequantize_q1_0>;
+        case GGML_TYPE_Q2_0:
+            return dequantize_block_sycl<QK2_0, QR2_0, dequantize_q2_0>;
+        case GGML_TYPE_PTQ1_0:
+            if (dst->src[0]->extra &&
+                ((ggml_tensor_extra_gpu *) dst->src[0]->extra)->optimized_feature.reorder) {
+                return dequantize_row_ptq1_0_sycl_reorder;
+            }
+            return dequantize_block_sycl<QK_PTQ1_0, QR_PTQ1_0, dequantize_ptq1_0>;
+        case GGML_TYPE_PQ2_0:
+            if (dst->src[0]->extra &&
+                ((ggml_tensor_extra_gpu *) dst->src[0]->extra)->optimized_feature.reorder) {
+                return dequantize_row_pq2_0_sycl_reorder;
+            }
+            return dequantize_block_sycl<QK_PQ2_0, QR_PQ2_0, dequantize_pq2_0>;
         case GGML_TYPE_Q4_0:
             if (dst->src[0]->extra &&
                 ((ggml_tensor_extra_gpu*)dst->src[0]->extra)->optimized_feature.reorder) {
@@ -716,11 +825,19 @@ to_fp32_sycl_t ggml_get_to_fp32_sycl(ggml_type type, ggml_tensor *dst) {
                 return dequantize_block_sycl<QK8_0, QR8_0, dequantize_q8_0>;
             }
         case GGML_TYPE_Q2_K:
-            return dequantize_row_q2_K_sycl;
+            if (dst->src[0]->extra && ((ggml_tensor_extra_gpu *) dst->src[0]->extra)->optimized_feature.reorder) {
+                return dequantize_row_q2_K_sycl_reorder;
+            } else {
+                return dequantize_row_q2_K_sycl;
+            }
         case GGML_TYPE_Q2_0_BITMAJOR:
             return dequantize_block_sycl<QK_K, 1, dequantize_q2_0_bitmajor>;
         case GGML_TYPE_Q3_K:
-            return dequantize_row_q3_K_sycl;
+            if (dst->src[0]->extra && ((ggml_tensor_extra_gpu *) dst->src[0]->extra)->optimized_feature.reorder) {
+                return dequantize_row_q3_K_sycl_reorder;
+            } else {
+                return dequantize_row_q3_K_sycl;
+            }
         case GGML_TYPE_Q4_K:
             if (dst->src[0]->extra &&
                 ((ggml_tensor_extra_gpu*)dst->src[0]->extra)->optimized_feature.reorder) {
@@ -729,7 +846,11 @@ to_fp32_sycl_t ggml_get_to_fp32_sycl(ggml_type type, ggml_tensor *dst) {
                 return dequantize_row_q4_K_sycl;
             }
         case GGML_TYPE_Q5_K:
-            return dequantize_row_q5_K_sycl;
+            if (dst->src[0]->extra && ((ggml_tensor_extra_gpu *) dst->src[0]->extra)->optimized_feature.reorder) {
+                return dequantize_row_q5_K_sycl_reorder;
+            } else {
+                return dequantize_row_q5_K_sycl;
+            }
         case GGML_TYPE_Q6_K:
             if (dst->src[0]->extra && ((ggml_tensor_extra_gpu *) dst->src[0]->extra)->optimized_feature.reorder) {
                 return dequantize_row_q6_K_sycl_reorder;
@@ -771,6 +892,22 @@ to_fp32_sycl_t ggml_get_to_fp32_sycl(ggml_type type, ggml_tensor *dst) {
 }
 
 
+#ifdef GGML_SYCL_HAS_BF16
+to_bf16_sycl_t ggml_get_to_bf16_sycl(ggml_type type, ggml_tensor * /*dst*/) {
+    switch (type) {
+        case GGML_TYPE_F32:
+            return convert_unary_sycl<float>;
+        case GGML_TYPE_F16:
+            return convert_unary_sycl<sycl::half>;
+        case GGML_TYPE_BF16:
+            return convert_unary_sycl<sycl::ext::oneapi::bfloat16>;
+        default:
+            GGML_ABORT("fatal error: unsupport data type=%s\n", ggml_type_name(type));
+            return nullptr;
+    }
+}
+#endif
+
 to_fp16_nc_sycl_t ggml_get_to_fp16_nc_sycl(ggml_type type) {
     switch (type) {
         case GGML_TYPE_F32:
@@ -779,6 +916,12 @@ to_fp16_nc_sycl_t ggml_get_to_fp16_nc_sycl(ggml_type type) {
         case GGML_TYPE_BF16:
             return convert_unary_nc_sycl<sycl::ext::oneapi::bfloat16>;
 #endif
+        case GGML_TYPE_Q1_0:
+            return dequantize_block_nc_sycl<QK1_0, QR1_0, dequantize_q1_0>;
+        case GGML_TYPE_PTQ1_0:
+            return dequantize_block_nc_sycl<QK_PTQ1_0, QR_PTQ1_0, dequantize_ptq1_0>;
+        case GGML_TYPE_PQ2_0:
+            return dequantize_block_nc_sycl<QK_PQ2_0, QR_PQ2_0, dequantize_pq2_0>;
         case GGML_TYPE_Q4_0:
             return dequantize_block_nc_sycl<QK4_0, QR4_0, dequantize_q4_0>;
         case GGML_TYPE_Q4_1:
@@ -792,4 +935,69 @@ to_fp16_nc_sycl_t ggml_get_to_fp16_nc_sycl(ggml_type type) {
         default:
             return nullptr;
     }
+}
+
+void ggml_sycl_quant_to_s4(ggml_type type, bool reordered, const void * vx, uint8_t * w4, float * scales,
+                           int64_t nrows, int64_t ncols, dpct::queue_ptr stream) {
+    GGML_ASSERT(type == GGML_TYPE_PQ2_0 || type == GGML_TYPE_PTQ1_0);
+    GGML_ASSERT(ncols % 128 == 0);
+    const int64_t   nb   = nrows * ncols / 128;
+    const uint8_t * base = (const uint8_t *) vx;
+    const bool      ptq  = type == GGML_TYPE_PTQ1_0;
+    // one work item = 8 elements = one uint32 of s4
+    stream->parallel_for(sycl::range<1>(nb * 16), [=](sycl::id<1> id) {
+        const int64_t ib = id[0] / 16;
+        const int     c  = (int) (id[0] % 16);
+        int           v[8];
+        sycl::half    d;
+        if (ptq) {
+            const uint8_t * qs;
+            const uint8_t * qh;
+            if (reordered) {
+                qs = base + ib * 24;
+                qh = base + nb * 24 + ib * 2;
+                d  = ((const sycl::half *) (base + nb * 26))[ib];
+            } else {
+                const block_ptq1_0 * x = (const block_ptq1_0 *) vx + ib;
+                qs = x->qs;
+                qh = x->qh;
+                d  = x->d;
+            }
+            // trit t of byte b = ((b * 3^t) mod 256) * 3 >> 8
+            constexpr uint32_t pow3[5] = { 1, 3, 9, 27, 81 };
+            if (c < 10) {         // elements t*16 + m, 8 consecutive m
+                const uint32_t p = pow3[c / 2];
+                const int      m = (c % 2) * 8;
+#pragma unroll
+                for (int i = 0; i < 8; ++i) v[i] = (int) ((((qs[m + i] * p) & 0xFF) * 3) >> 8) - 1;
+            } else if (c < 15) {  // elements 80 + t*8 + m, m = 0..7
+                const uint32_t p = pow3[c - 10];
+#pragma unroll
+                for (int i = 0; i < 8; ++i) v[i] = (int) ((((qs[16 + i] * p) & 0xFF) * 3) >> 8) - 1;
+            } else {              // elements 120 + t*2 + h
+#pragma unroll
+                for (int i = 0; i < 8; ++i) v[i] = (int) ((((qh[i % 2] * pow3[i / 2]) & 0xFF) * 3) >> 8) - 1;
+            }
+        } else {
+            const uint8_t * qs;
+            if (reordered) {
+                qs = base + ib * 32;
+                d  = ((const sycl::half *) (base + nb * 32))[ib];
+            } else {
+                const block_pq2_0 * x = (const block_pq2_0 *) vx + ib;
+                qs = x->qs;
+                d  = x->d;
+            }
+#pragma unroll
+            for (int i = 0; i < 8; ++i) v[i] = ((qs[2 * c + i / 4] >> (2 * (i % 4))) & 3) - 1;
+        }
+        uint32_t out = 0;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) out |= (uint32_t) (v[i] & 0xF) << (4 * i);
+        ((uint32_t *) w4)[id[0]] = out;
+        if (c == 0) {
+            const int64_t bpr = ncols / 128;
+            scales[(ib % bpr) * nrows + ib / bpr] = d;  // [group][row]
+        }
+    });
 }

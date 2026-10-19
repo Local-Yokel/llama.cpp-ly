@@ -7,13 +7,13 @@
 #include "../src/unicode.h"
 #include "../src/llama-grammar.h"
 
-#include <nlohmann/json.hpp>
+#include "json.h"
 
 #include <cassert>
 #include <string>
 #include <vector>
 
-using json = nlohmann::ordered_json;
+using json = common_json;
 
 static llama_grammar * build_grammar_with_root(const std::string & grammar_str, const char * grammar_root) {
     return llama_grammar_init_impl(nullptr, grammar_str.c_str(), grammar_root, false, nullptr, 0, nullptr, 0);
@@ -1399,6 +1399,118 @@ static void test_json_schema() {
             R"""({"b": "bar"})""",
             R"""({"a": "foo", "c": "baz"})""",
             R"""({"a":"foo", "b":"bar", "c":"baz", "d":"qux"})""",
+        }
+    );
+
+    test_schema(
+        "optional props declared before a required one: declared order and required-first both accepted",
+        // Schema
+        R"""({
+            "properties": {
+                "name": {"type": "string"},
+                "nickname": {"type": "string"},
+                "age": {"type": "integer"},
+                "city": {"type": "string"}
+            },
+            "required": ["name", "city"],
+            "additionalProperties": false
+        })""",
+        // Passing strings
+        {
+            // both optional fields skipped
+            R"""({"name": "Ana", "city": "Lima"})""",
+            // only the first optional field
+            R"""({"name": "Ana", "nickname": "An", "city": "Lima"})""",
+            // only the second optional field
+            R"""({"name": "Ana", "age": 30, "city": "Lima"})""",
+            // both optional fields
+            R"""({"name": "Ana", "nickname": "An", "age": 30, "city": "Lima"})""",
+            // required-first order (what stock llama.cpp produced) is still accepted
+            R"""({"name": "Ana", "city": "Lima", "nickname": "An"})""",
+            R"""({"name": "Ana", "city": "Lima", "nickname": "An", "age": 30})""",
+            R"""({"name": "Ana", "city": "Lima", "age": 30})""",
+        },
+        // Failing strings
+        {
+            // the same optional field twice
+            R"""({"name": "Ana", "nickname": "An", "city": "Lima", "nickname": "An"})""",
+            // optional fields out of order
+            R"""({"name": "Ana", "age": 30, "nickname": "An", "city": "Lima"})""",
+            // missing a required field
+            R"""({"name": "Ana", "nickname": "An"})""",
+            // first required field not first
+            R"""({"nickname": "An", "name": "Ana", "city": "Lima"})""",
+        }
+    );
+
+    test_schema(
+        "optional props before a required one, additionalProperties not set",
+        // Schema
+        R"""({
+            "properties": {
+                "name": {"type": "string"},
+                "nickname": {"type": "string"},
+                "city": {"type": "string"}
+            },
+            "required": ["name", "city"]
+        })""",
+        // Passing strings
+        {
+            R"""({"name": "Ana", "city": "Lima"})""",
+            R"""({"name": "Ana", "nickname": "An", "city": "Lima"})""",
+            R"""({"name": "Ana", "city": "Lima", "nickname": "An"})""",
+        },
+        // Failing strings
+        {
+            R"""({"name": "Ana", "nickname": "An", "city": "Lima", "nickname": "An"})""",
+            R"""({"name": "Ana", "nickname": "An"})""",
+        }
+    );
+
+    test_schema(
+        "optional first property keeps required-first order (unchanged)",
+        // Schema
+        R"""({
+            "properties": {
+                "nickname": {"type": "string"},
+                "name": {"type": "string"},
+                "city": {"type": "string"}
+            },
+            "required": ["name", "city"],
+            "additionalProperties": false
+        })""",
+        // Passing strings
+        {
+            R"""({"name": "Ana", "city": "Lima"})""",
+            R"""({"name": "Ana", "city": "Lima", "nickname": "An"})""",
+        },
+        // Failing strings
+        {
+            R"""({"nickname": "An", "name": "Ana", "city": "Lima"})""",
+        }
+    );
+
+    test_schema(
+        "optional before required with additional properties keeps required-first order (unchanged)",
+        // Schema
+        R"""({
+            "properties": {
+                "name": {"type": "string"},
+                "nickname": {"type": "string"},
+                "city": {"type": "string"}
+            },
+            "required": ["name", "city"],
+            "additionalProperties": true
+        })""",
+        // Passing strings
+        {
+            R"""({"name": "Ana", "city": "Lima"})""",
+            R"""({"name": "Ana", "city": "Lima", "nickname": "An"})""",
+            R"""({"name": "Ana", "city": "Lima", "extra": 1})""",
+        },
+        // Failing strings
+        {
+            R"""({"name": "Ana", "nickname": "An", "city": "Lima"})""",
         }
     );
 

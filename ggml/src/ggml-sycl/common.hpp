@@ -25,8 +25,16 @@
 #include "presets.hpp"
 #include "type.hpp"
 #include "sycl_hw.hpp"
+#include "fattn-buffers.hpp"
 
 namespace syclexp = sycl::ext::oneapi::experimental;
+
+#if defined(__INTEL_LLVM_COMPILER) && __has_include(<sycl/ext/oneapi/bfloat16.hpp>)
+    #include <sycl/ext/oneapi/bfloat16.hpp>
+    #ifndef GGML_SYCL_HAS_BF16
+        #define GGML_SYCL_HAS_BF16
+    #endif
+#endif
 
 #if GGML_SYCL_DNNL
 #include "dnnl.hpp"
@@ -37,6 +45,7 @@ namespace syclexp = sycl::ext::oneapi::experimental;
 #define GGML_COMMON_IMPL_SYCL
 #define SYCL_FLASH_ATTN //remove it to disable FLASH_ATTENTION in building.
 #define SYCL_FAST_FP16  //don't change. remove it will break fattn-tile.hpp building
+#define GGML_SYCL_FA_ALL_QUANTS //define it to enable all quantization types in flash attention. undefine it to only support F16, Q4_0 and Q8_0 in flash attention.
 
 /* suppress warning spam */
 #pragma clang diagnostic push
@@ -50,9 +59,16 @@ void ggml_sycl_host_free(void* ptr);
 
 
 extern int g_ggml_sycl_debug;
-extern int g_ggml_sycl_disable_optimize;
+extern int g_ggml_sycl_enable_optimize;
+extern int g_ggml_sycl_quant_f16_gemm;
+extern int g_ggml_sycl_quant_s4_gemm;
+extern int g_ggml_sycl_enable_fusion;
+extern int g_ggml_sycl_enable_esimd;
 extern int g_ggml_sycl_prioritize_dmmv;
 extern int g_ggml_sycl_enable_flash_attention;
+extern int g_ggml_sycl_dev2dev_memcpy;
+extern int g_ggml_sycl_fa_onednn;
+extern int g_ggml_sycl_fa_onednn_max_kv;
 
 
 #if defined(__clang__) && __has_builtin(__builtin_expect)
@@ -115,6 +131,12 @@ enum ggml_sycl_backend_gpu_mode {
   SYCL_UNSET_GPU_MODE = -1,
   SYCL_SINGLE_GPU_MODE = 0,
   SYCL_MUL_GPU_MODE
+};
+
+enum ggml_sycl_dev2dev_memcpy_mode {
+  DEV2DEV_MEMCPY_SYCL = 0,
+  DEV2DEV_MEMCPY_L0 = 1,
+  DEV2DEV_MEMCPY_FORWARD = 2
 };
 
 static_assert(sizeof(sycl::half) == sizeof(ggml_fp16_t), "wrong fp16 size");
@@ -204,6 +226,8 @@ inline dpct::err0 ggml_sycl_set_device(const int device) try {
 //////////////////////
 struct optimize_feature {
     bool reorder=false;
+    bool xmx_pq2=false; // PQ2_0 rewritten into the XMX layout (pq2_xmx.hpp); only that path can read it
+    bool t2=false;  // ARC-LAB: PTQ1_0 repacked to the TernSYCL 2-bit layout (ptq1-t2.cpp)
 };
 
 struct sycl_device_info {
@@ -216,9 +240,14 @@ struct sycl_device_info {
     int max_wg_per_cu; // max work groups per compute unit - refer to
                        // cudaOccupancyMaxActiveBlocksPerMultiprocessor
     bool    vmm;                // virtual memory support
+    bool    l0_device_type_valid;
+    bool    l0_discrete_gpu;    // Level Zero backend and not an integrated GPU
+    size_t  vmm_granularity;    // granularity of virtual memory
     size_t  total_vram;
-    //sycl_hw_info hw_info;     \\ device id and aarch, currently not used
+    sycl_hw_info hw_info;
     optimize_feature opt_feature;
+    bool    usm_system_support; // support for USM system allocations
+    int     dpas_exec_size;     // XMX DPAS width (8 or 16) for int8, 0 without XMX
 };
 
 
@@ -230,9 +259,13 @@ struct ggml_sycl_device_info {
     std::array<float, GGML_SYCL_MAX_DEVICES> default_tensor_split = {};
 
     int max_work_group_sizes[GGML_SYCL_MAX_DEVICES] = {0};
+
+    bool ext_oneapi_level_zero = true; // sycl::backend::ext_oneapi_level_zero used by all enumerated GPU devices
 };
 
 const ggml_sycl_device_info & ggml_sycl_info();
+
+static constexpr size_t SYCL_BUFFER_ALIGNMENT = 128;
 
 struct ggml_sycl_pool {
     virtual ~ggml_sycl_pool() = default;
@@ -302,7 +335,16 @@ struct ggml_tensor_extra_gpu {
   optimize_feature optimized_feature;
 };
 
+extern int g_ggml_sycl_use_level_zero_api;
+void * ggml_sycl_malloc_device(size_t size, sycl::queue &q);
+void ggml_sycl_free_device(void *ptr, sycl::queue &q);
+
 void release_extra_gpu(ggml_tensor_extra_gpu * extra, std::vector<queue_ptr> streams={});
+
+struct mmid_row_mapping {
+    int32_t i1;
+    int32_t i2;
+};
 
 namespace sycl_ex = sycl::ext::oneapi::experimental;
 struct ggml_backend_sycl_context {
@@ -397,11 +439,17 @@ struct ggml_backend_sycl_context {
     std::unique_ptr<ggml_sycl_pool> pools[GGML_SYCL_MAX_DEVICES];
     std::unordered_map<sycl::queue *, std::unique_ptr<ggml_sycl_pool_alloc<uint8_t>>> scratchpad_map;
 
+    std::unique_ptr<ggml_sycl_fattn_kv_buffers> fattn_bufs[GGML_SYCL_MAX_DEVICES];
+
     std::unique_ptr<ggml_sycl_pool> host_pools[GGML_SYCL_MAX_DEVICES];
+
+    std::vector<mmid_row_mapping> mmid_row_mapping_host;
 
     static std::unique_ptr<ggml_sycl_pool> new_pool_for_device(queue_ptr qptr, int device);
 
     static std::unique_ptr<ggml_sycl_pool> new_pool_for_host(queue_ptr qptr, int device);
+
+    static std::unique_ptr<ggml_sycl_fattn_kv_buffers> new_fattn_kv_buffers(queue_ptr qptr, int device);
 
     ggml_sycl_pool & pool(int device) {
         if (pools[device] == nullptr) {
@@ -412,6 +460,17 @@ struct ggml_backend_sycl_context {
 
     ggml_sycl_pool & pool() {
         return pool(device);
+    }
+
+    ggml_sycl_fattn_kv_buffers & fattn_buffers(int device) {
+        if (fattn_bufs[device] == nullptr) {
+            fattn_bufs[device] = new_fattn_kv_buffers(stream(device, 0), device);
+        }
+        return *fattn_bufs[device];
+    }
+
+    ggml_sycl_fattn_kv_buffers & fattn_buffers() {
+        return fattn_buffers(device);
     }
 
 #ifdef GGML_SYCL_GRAPH
@@ -610,6 +669,8 @@ constexpr size_t ceil_div(const size_t m, const size_t n) {
 }
 
 bool gpu_has_xmx(sycl::device &dev);
+
+int ggml_sycl_get_env(const char *env_name, int default_val);
 
 template <int N, class T> std::string debug_get_array_str(const std::string & prefix, const T array[N]) {
     if (LIKELY(!g_ggml_sycl_debug)) {
@@ -967,9 +1028,26 @@ static T block_reduce(T val, T * shared_vals, int block_size_template) {
 }
 
 static __dpct_inline__ float ggml_sycl_ue4m3_to_fp32(uint8_t x) {
-    const uint32_t bits = x * (x != 0x7F && x != 0xFF);
-    const __nv_fp8_e4m3 xf = *reinterpret_cast<const __nv_fp8_e4m3 *>(&bits);
-    return static_cast<float>(xf) / 2;
+    // UE4M3 is unsigned: 4 exp bits (bias 7), 3 mantissa bits, no sign, no NaN.
+    // exp == 0xF is a valid exponent (256-448 range), not NaN.
+    if (x == 0 || x == 0x7F) {
+        return 0.0f;
+    }
+    const int exp = (x >> 3) & 0xF;
+    const int man = x & 0x7;
+    float raw;
+    if (exp == 0) {
+        raw = man * (1.0f / 8.0f) * sycl::pow(2.0f, -6.0f);
+    } else {
+        raw = (1.0f + man / 8.0f) * sycl::pow(2.0f, (float) exp - 7.0f);
+    }
+    return raw * 0.5f;
 }
+
+// ARC-LAB lab knobs: integer tuning switches read through here can be changed while the process runs. With
+// GGML_SYCL_KNOBS_FILE=<path> set, the file (NAME=VALUE lines) is re-read at the start of a graph compute when its
+// mtime changes and its values override the environment; without it, each knob is read from the environment once.
+int  ggml_sycl_knob(const char * name, int def);
+void ggml_sycl_knobs_refresh();
 
 #endif // GGML_SYCL_COMMON_HPP
